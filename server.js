@@ -1,134 +1,219 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // server.js  –  Company Directory Exporter
 // ─────────────────────────────────────────────────────────────────────────────
-// Two routes:
-//   POST /scrape   – scrapes ALL pages of a directory, resolves company names,
-//                    and returns the final dataset as JSON
-//   POST /download – takes company data and returns a formatted Excel file
+// Routes:
+//   GET  /        – serves the frontend (public/index.html)
+//   POST /scrape  – scrapes ALL pages of a directory and returns JSON
+//   POST /download – converts company data into a downloadable Excel file
 // ─────────────────────────────────────────────────────────────────────────────
 
 const express = require('express');
 const axios   = require('axios');
 const cheerio = require('cheerio');
 const ExcelJS = require('exceljs');
-const path    = require('path'); // built into Node — no install needed
-                                 // used to build absolute file paths that work
-                                 // on every machine and on Vercel
+const path    = require('path');
 
 const app  = express();
 const PORT = 3000;
 
 app.use(express.json());
-
-// Serve everything in the /public folder as static files (HTML, CSS, JS).
-//
-// WHY path.join(__dirname, 'public') instead of just 'public':
-//   'public' is a *relative* path — it resolves from wherever Node was launched.
-//   Locally that's usually the project root, so it works fine.
-//   On Vercel the working directory is different, so 'public' points nowhere.
-//   __dirname is always the *absolute* path to the folder containing server.js,
-//   so path.join(__dirname, 'public') finds the right folder every time.
 app.use(express.static(path.join(__dirname, 'public')));
-
-// Explicit route for the homepage "/".
-//
-// express.static() handles requests for named files like "/index.html",
-// but won't automatically serve index.html for a bare "/" on all platforms.
-// This route makes sure visiting the root URL always returns the app.
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
+app.get('/', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  SECTION 1 — SCRAPER CONFIGURATION
+//  SECTION 1 — SITE PROFILES
 //  ─────────────────────────────────────────────────────────────────────────────
-//  All the CSS selectors and tuning values live here.
-//  If the scraper stops working on a site, this is the first place to edit.
+//  A "site profile" tells the scraper exactly how a specific directory is built.
+//  When the URL being scraped matches a known domain, that profile's settings
+//  are used instead of (or before) the generic auto-detection logic.
+//
+//  HOW TO ADD A NEW SITE
+//  ─────────────────────
+//  1. Open the site in Chrome, right-click a company listing → Inspect
+//  2. Find the element that wraps ONE complete listing and copy its class name
+//  3. Add a new entry below with that class name in `containers`
+//  4. Adjust `nameSelectors` and `websiteFilter` if needed
+//
+//  PROFILE FIELDS
+//  ──────────────
+//  layout          'card' | 'list' | 'searchResults'
+//                  Describes the visual structure of the page.
+//                  Used by auto-detection as a hint if no containers match.
+//
+//  containers      Array of CSS selectors tried in order.
+//                  The first one that returns 2+ elements wins.
+//                  ▶ Put the most specific/accurate selector first.
+//
+//  contentScope    (optional) CSS selector for the area of the page that
+//                  contains the listings.  Used to avoid matching navigation
+//                  or footer elements when containers are generic (e.g. 'li').
+//
+//  nameSelectors   (optional) CSS selectors tried inside each container to
+//                  find the company name element.  Overrides the defaults.
+//
+//  websiteFilter   (optional) function(href) → boolean
+//                  Return false to skip a link as the website URL.
+//                  Use this to exclude internal links that look external.
+//                  Example: href => !href.includes('yell.com')
+//
+//  nextPage        (optional) extra CSS selectors for the "next page" link.
+//
+//  nextPageText    (optional) extra visible-text strings meaning "next page".
 // ═════════════════════════════════════════════════════════════════════════════
 
-const SELECTORS = {
+const SITE_PROFILES = {
 
-  // Each entry here is a CSS selector that should match ONE company card on the
-  // directory page.  The scraper tries them in order and stops at the first hit.
-  containers: [
-    '.member-directory-listing',
-    '.wpbdp-listing',
-    '.geodir-category-listing',
-    '.listing-item',
-    '.directory-item',
-    '.member-listing',
-    '.member-item',
-    '.member',
-    '.company-item',
-    '.grid-item',
+  // ── The Property Institute ──────────────────────────────────────────────────
+  'tpi.org.uk': {
+    layout: 'card',
+    containers: [
+      '.member-directory-listing',
+      '.member-listing',
+      '.member-item',
+      '.member',
+      '.listing-item',
+      'article',
+    ],
+  },
+
+  // ── Thomson Local ───────────────────────────────────────────────────────────
+  // Uses plain <li> elements with no CSS classes.
+  // contentScope narrows the search to the main content area so we don't match
+  // navigation or footer list items.
+  'thomsonlocal.com': {
+    layout: 'list',
+    contentScope: 'main, #main, [id*="result"], [class*="result-list"], [class*="search-result"]',
+    containers: ['li'],
+    nameSelectors: ['h2', 'h3', 'h4'],
+    // Exclude Thomson Local's own internal profile links
+    websiteFilter: href => !href.includes('thomsonlocal.com'),
+  },
+
+  // ── Clutch.co ───────────────────────────────────────────────────────────────
+  // ⚠ BLOCKED: Clutch uses Cloudflare. Standard HTTP requests return a
+  // challenge page. This profile is ready for use with a headless browser
+  // or residential proxy service.
+  'clutch.co': {
+    layout: 'card',
+    containers: [
+      '[class*="provider-list-item"]',
+      '[class*="sg-provider"]',
+      'li.provider',
+      'article',
+    ],
+    nameSelectors: ['h3', 'h2', '[class*="company-name"]', '[class*="provider-name"]'],
+  },
+
+  // ── Yell.com ────────────────────────────────────────────────────────────────
+  // ⚠ BLOCKED: Yell returns 403 for automated requests. This profile is ready
+  // for use with a headless browser or residential proxy service.
+  'yell.com': {
+    layout: 'searchResults',
+    containers: [
+      '[class*="businessCapsule"]',
+      '[class*="business-capsule"]',
+      '[class*="businessCard"]',
+      '[class*="listing"]',
+      'article',
+    ],
+    nameSelectors: ['h2', 'h3', '[class*="businessName"]', '[class*="business-name"]'],
+    // Exclude Yell's own internal profile links
+    websiteFilter: href => !href.includes('yell.com'),
+  },
+
+  // ── Add more sites here following the same pattern ──────────────────────────
+};
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  FALLBACK SELECTORS
+//  Used when no site profile matches, or when the profile's containers don't
+//  find anything.  Organised by layout type so the most likely ones are tried
+//  first.  You can add selectors here without touching individual profiles.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const FALLBACK_SELECTORS = {
+  // Card-based layouts — each listing is a styled box/card
+  card: [
+    '[class*="listing-item"]',
+    '[class*="result-item"]',
+    '[class*="business-card"]',
+    '[class*="company-card"]',
+    '[class*="member-card"]',
+    '[class*="provider"]',
+    '[class*="directory-item"]',
+    '[class*="member"]',
     'article',
-    'li.wpbdp-listing',
+    '.card',
   ],
 
-  // These selectors are tried INSIDE each container to find the company name.
-  // They are used before the automatic fallback strategies.
-  companyName: [
-    '.member-name',
-    '.listing-title',
-    '.company-name',
-    '.entry-title',
-    '.wpbdp-field-display-value',
-    'h1', 'h2', 'h3', 'h4', 'h5',
-    'strong',
+  // List-based layouts — each listing is a <li> inside a <ul> or <ol>
+  list: [
+    'main ul > li',
+    '#content ul > li',
+    '#results ul > li',
+    '.results > ul > li',
+    '[id*="result"] ul > li',
+    '[class*="result"] ul > li',
+    '[class*="listing"] > ul > li',
+    'main ol > li',
   ],
 
-  // CSS selectors for the "next page" pagination link.
-  nextPage: [
-    'a.next',
-    'a[rel="next"]',
-    '.pagination a.next',
-    '.nav-links a.next',
-    'li.next a',
-    '.next-page a',
-    'a[aria-label="Next page"]',
-    'a[aria-label="Next"]',
+  // Search-result layouts — varied structures typical of search pages
+  searchResults: [
+    '[class*="search-result"]',
+    '[class*="serp-item"]',
+    '[class*="result-card"]',
+    '[class*="hit"]',   // Algolia-style search
+    '[class*="listing"]',
+    'article',
+  ],
+
+  // Last-resort selectors tried regardless of layout type
+  generic: [
+    'article',
+    '[class*="item"]',
+    '[class*="entry"]',
   ],
 };
 
-// Visible link text that means "go to the next page".
-// Add more here if you encounter a site using a different label.
-const NEXT_LINK_TEXT = ['next', '›', '»', 'next page', '>'];
+// Default name selectors tried inside any container (when no profile overrides them)
+const DEFAULT_NAME_SELECTORS = [
+  '.member-name', '.listing-title', '.company-name',
+  '.business-name', '.entry-title', '.provider-name',
+  'h1', 'h2', 'h3', 'h4', 'h5',
+  'strong',
+];
 
-// Stop after this many pages no matter what.
-// Prevents runaway loops on broken or circular pagination.
+// Link text that signals "go to the next page"
+const NEXT_PAGE_TEXT = ['next', '›', '»', 'next page', '>'];
+
+// CSS selectors for "next page" links used when no profile specifies its own
+const DEFAULT_NEXT_PAGE_SELECTORS = [
+  'a.next', 'a[rel="next"]',
+  '.pagination a.next', '.nav-links a.next',
+  'li.next a', '.next-page a',
+  'a[aria-label="Next page"]', 'a[aria-label="Next"]',
+];
+
+// Safety cap — stop after this many pages even if a "next" link keeps appearing
 const MAX_PAGES = 100;
 
-// Wait this many milliseconds between page fetches.
-// A small delay is polite and reduces the chance of being blocked.
+// Polite delay between page requests (milliseconds)
 const PAGE_DELAY_MS = 600;
 
+// Company website resolution settings
+const RESOLVE_CONCURRENCY    = 5;     // max simultaneous website fetches
+const WEBSITE_FETCH_TIMEOUT_MS = 5000; // ms before giving up on a slow site
 
-// ── Company website resolution settings ───────────────────────────────────────
-
-// How many company websites to fetch at the same time during name resolution.
-// Increase for speed, decrease if you get connection errors or are blocked.
-const RESOLVE_CONCURRENCY = 5;
-
-// Give up on fetching a company's website after this many milliseconds.
-// 5 seconds is generous for a homepage — slow sites beyond this are skipped.
-// ▶ Raise this number if you find valid sites are being skipped too often.
-const WEBSITE_FETCH_TIMEOUT_MS = 5000;
-
-// A Set of lowercase strings that are too vague to be real company names.
-// If a name matches one of these, we'll try the company website instead.
-// ▶ To add more, put them inside the Set(...) below.
+// Names too vague to trust — triggers website resolution fallback
 const GENERIC_NAMES = new Set([
   'home', 'homepage', 'welcome', 'untitled', 'index',
-  'website', 'site', 'online', 'page', 'loading',
-  'error', 'not found', '404',
+  'website', 'site', 'online', 'page', 'loading', 'error', 'not found', '404',
 ]);
 
-// Words/phrases that appear after separators in page <title> tags but are NOT
-// part of the real company name.
-// e.g.  "Acme Ltd | Home"        →  we keep "Acme Ltd", discard "Home"
-// e.g.  "Acme - Official Website"→  we keep "Acme", discard "Official Website"
-// ▶ Add more here if you see other junk patterns in the output.
+// Junk suffixes stripped from page titles
 const TITLE_JUNK_SEGMENTS = [
   'home', 'homepage', 'welcome', 'official site', 'official website',
   'the official site', 'the official website', 'website', 'online',
@@ -136,21 +221,38 @@ const TITLE_JUNK_SEGMENTS = [
 
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  SECTION 2 — GENERAL UTILITIES
+//  SECTION 2 — PROFILE LOOKUP
 // ═════════════════════════════════════════════════════════════════════════════
 
-// Returns a promise that resolves after `ms` milliseconds.
-// Used to add a polite pause between page requests.
+// Returns the SITE_PROFILE entry for a given URL, or null if none matches.
+// Matches on the hostname so "www.yell.com" still matches the "yell.com" key.
+function getProfile(url) {
+  try {
+    const hostname = new URL(url).hostname.replace(/^www\./, '');
+    // Check for an exact domain match, then try parent domains
+    // e.g. "london.thomsonlocal.com" would match "thomsonlocal.com"
+    for (const domain of Object.keys(SITE_PROFILES)) {
+      if (hostname === domain || hostname.endsWith('.' + domain)) {
+        return SITE_PROFILES[domain];
+      }
+    }
+  } catch { /* ignore malformed URLs */ }
+  return null;
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  SECTION 3 — GENERAL UTILITIES
+// ═════════════════════════════════════════════════════════════════════════════
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 // Fetches a URL and returns the raw HTML string.
-// `timeoutMs` controls how long to wait before giving up.
 async function fetchPage(url, timeoutMs = 20000) {
   const response = await axios.get(url, {
     headers: {
-      // Pretend to be a regular browser so sites don't block us
       'User-Agent':
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
         'AppleWebKit/537.36 (KHTML, like Gecko) ' +
@@ -164,124 +266,193 @@ async function fetchPage(url, timeoutMs = 20000) {
 }
 
 // Returns true if `text` looks like a web address rather than a company name.
-// Examples that return true:  "https://acme.com", "www.acme.co.uk", "acme.co.uk"
-// Examples that return false: "Acme Ltd", "2ManageProperty"
 function looksLikeUrl(text) {
   return (
-    /^https?:\/\//i.test(text) ||           // starts with http:// or https://
-    /^www\./i.test(text) ||                  // starts with www.
-    /^[a-z0-9-]+\.[a-z]{2,}(\/|$)/i.test(text) // bare domain like "acme.co.uk"
+    /^https?:\/\//i.test(text) ||
+    /^www\./i.test(text) ||
+    /^[a-z0-9-]+\.[a-z]{2,}(\/|$)/i.test(text)
   );
+}
+
+// Returns true if an element is inside a nav, header, footer, or sidebar.
+// Used to discard list items that are part of the page chrome rather than listings.
+function isPageChrome($, el) {
+  return $(el).closest('nav, header, footer, aside, [class*="nav"], [class*="menu"], [class*="sidebar"]').length > 0;
 }
 
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  SECTION 3 — DIRECTORY PAGE EXTRACTION
-//  (scraping company data from the listing pages)
+//  SECTION 4 — CONTAINER DETECTION
+//  ─────────────────────────────────────────────────────────────────────────────
+//  Finding the right "container" — the element that wraps one complete listing
+//  — is the hardest part of scraping any directory.
+//
+//  This section tries selectors in a specific priority order:
+//    1. Site profile containers (most accurate, site-specific)
+//    2. Layout-appropriate fallbacks from FALLBACK_SELECTORS
+//    3. Generic last-resort selectors
+//
+//  Each candidate is scored: it must match at least 2 elements and must not
+//  consist entirely of page-chrome elements (nav, header, footer).
 // ═════════════════════════════════════════════════════════════════════════════
 
-// ── extractName ────────────────────────────────────────────────────────────────
-// Tries to pull a company name out of a single container element.
-// Three strategies are tried in order:
-//   1. Look for a specific CSS selector (e.g. .member-name, h3)
-//   2. Find the first anchor link whose visible text is NOT a web address
-//   3. Take the first line of text that doesn't look like a URL, phone, or email
-function extractName($, el) {
+// ── getSearchRoot ─────────────────────────────────────────────────────────────
+// If the profile has a contentScope, narrow the search to that element.
+// This is critical for list layouts where <li> appears in nav/footer too.
+function getSearchRoot($, profile) {
+  if (profile && profile.contentScope) {
+    const scopeEl = $(profile.contentScope).first();
+    if (scopeEl.length) {
+      console.log(`     🔍 Content scoped to: "${profile.contentScope}"`);
+      return scopeEl;
+    }
+  }
+  return null; // null means "search the whole page"
+}
 
-  // Strategy 1: explicit CSS selectors from config
-  for (const sel of SELECTORS.companyName) {
-    const found = $(el).find(sel).first();
-    const text  = found.text().trim();
+// ── trySelector ───────────────────────────────────────────────────────────────
+// Runs a CSS selector against either a scoped root element or the full page.
+// Returns a filtered Cheerio set that excludes page-chrome elements,
+// or an empty set if the selector returned fewer than 2 real results.
+function trySelector($, selector, scopeRoot) {
+  // If we have a scoped root element, search inside it; otherwise search the page
+  const raw = scopeRoot ? scopeRoot.find(selector) : $(selector);
+
+  // Filter out anything inside nav / header / footer
+  const filtered = raw.filter((_i, el) => !isPageChrome($, el));
+
+  // Require at least 2 matches — a single match is probably not a listing grid
+  return filtered.length >= 2 ? filtered : $();
+}
+
+// ── findContainers ─────────────────────────────────────────────────────────────
+// Main entry point for container detection.
+// Returns { containers: CheerioSet, matchedSelector: string, method: string }
+function findContainers($, profile) {
+  const scopeRoot = getSearchRoot($, profile);
+  const layout    = (profile && profile.layout) || 'card'; // default to card
+
+  // ── Priority 1: profile-specific containers ──────────────────────────────
+  if (profile && profile.containers) {
+    for (const sel of profile.containers) {
+      const found = trySelector($, sel, scopeRoot);
+      if (found.length) {
+        return { containers: found, matchedSelector: sel, method: 'profile' };
+      }
+    }
+  }
+
+  // ── Priority 2: layout-appropriate fallbacks ─────────────────────────────
+  // Use the layout type as a hint to pick the most likely selectors first
+  const layoutSelectors  = FALLBACK_SELECTORS[layout]  || [];
+  const genericSelectors = FALLBACK_SELECTORS.generic   || [];
+  const allFallbacks     = [...layoutSelectors, ...genericSelectors];
+
+  // Also add the other layout types as a last attempt, so we don't give up
+  // if the layout detection was wrong
+  for (const otherLayout of ['card', 'list', 'searchResults']) {
+    if (otherLayout !== layout) {
+      allFallbacks.push(...(FALLBACK_SELECTORS[otherLayout] || []));
+    }
+  }
+
+  for (const sel of allFallbacks) {
+    const found = trySelector($, sel, scopeRoot);
+    if (found.length) {
+      return { containers: found, matchedSelector: sel, method: 'fallback' };
+    }
+  }
+
+  // ── Nothing found ────────────────────────────────────────────────────────
+  return { containers: $(), matchedSelector: null, method: 'none' };
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  SECTION 5 — DATA EXTRACTION (NAME + WEBSITE FROM A SINGLE CONTAINER)
+// ═════════════════════════════════════════════════════════════════════════════
+
+// ── extractName ───────────────────────────────────────────────────────────────
+// Tries three strategies in order to get the company name from one container.
+// Accepts `nameSelectors` from the site profile (or falls back to defaults).
+function extractName($, el, nameSelectors) {
+  const selectors = nameSelectors || DEFAULT_NAME_SELECTORS;
+
+  // Strategy 1: explicit CSS selectors (profile or defaults)
+  for (const sel of selectors) {
+    const text = $(el).find(sel).first().text().trim();
     if (text) return text;
   }
 
-  // Strategy 2: first anchor tag whose TEXT looks like a name (not a URL)
-  // This catches patterns like:
-  //   <a href="https://acme.com">Acme Ltd</a>          ← external link, text is name
-  //   <a href="/members/acme-ltd/">Acme Ltd</a>         ← internal profile link
+  // Strategy 2: first anchor whose visible text is NOT a web address
+  // Catches both internal profile links and external links where the
+  // link text is the company name (e.g. <a href="https://acme.com">Acme Ltd</a>)
   let linkText = '';
   $(el).find('a[href]').each((_i, a) => {
     const href = ($(a).attr('href') || '').trim();
     const text = $(a).text().trim();
-
-    // Skip links that are clearly not company names
-    if (
-      href.startsWith('tel:')        ||
-      href.startsWith('mailto:')     ||
-      href.startsWith('#')           ||
-      href.startsWith('javascript:')
-    ) return; // continue to next link
-
-    // Skip if the visible text itself looks like a domain
+    if (href.startsWith('tel:') || href.startsWith('mailto:') ||
+        href.startsWith('#')    || href.startsWith('javascript:')) return;
     if (looksLikeUrl(text)) return;
-
-    if (text.length > 1) {
-      linkText = text;
-      return false; // break — stop the loop
-    }
+    if (text.length > 1) { linkText = text; return false; } // break
   });
   if (linkText) return linkText;
 
-  // Strategy 3: first meaningful line of text in the container.
-  //
-  // Important: Cheerio's .text() strips ALL tags silently, including <br>.
-  // If the site uses <br> to separate fields like:
-  //   CompanyName<br>Address<br>Phone
-  // then .text() returns "CompanyNameAddressPhone" (all mashed together).
-  //
-  // Fix: grab the raw HTML, replace <br> tags with newlines BEFORE stripping tags.
+  // Strategy 3: first meaningful line of container text.
+  // Replace <br> with newlines before stripping tags so words don't run together.
   const rawHtml = $(el).html() || '';
-  const textWithBreaks = rawHtml
-    .replace(/<br\s*\/?>/gi, '\n') // <br> → real newline
-    .replace(/<[^>]+>/g, ' ');     // all other tags → space
-
-  const lines = textWithBreaks
+  const lines = rawHtml
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
     .split(/[\r\n]+/)
     .map(l => l.replace(/\s+/g, ' ').trim())
-    .filter(l =>
-      l.length > 1 &&
-      !looksLikeUrl(l) &&
-      !/^\+?[\d\s\-().]{6,}$/.test(l) && // not a phone number
-      !l.includes('@')                     // not an email address
-    );
+    .filter(l => l.length > 1 && !looksLikeUrl(l) &&
+                 !/^\+?[\d\s\-().]{6,}$/.test(l) && !l.includes('@'));
   return lines[0] || '';
 }
 
 // ── extractWebsite ─────────────────────────────────────────────────────────────
-// Returns the first external URL (http:// or https://) found in the container.
-function extractWebsite($, el) {
+// Returns the first external URL in the container that passes the profile's
+// websiteFilter (if one is defined).
+function extractWebsite($, el, profile) {
+  const filter = profile && profile.websiteFilter;
   let website = '';
   $(el).find('a[href]').each((_i, a) => {
     const href = ($(a).attr('href') || '').trim();
-    if (/^https?:\/\//i.test(href)) {
-      website = href;
-      return false; // break
-    }
+    if (!/^https?:\/\//i.test(href)) return;      // must be a full URL
+    if (filter && !filter(href)) return;           // must pass the profile filter
+    website = href;
+    return false; // break
   });
   return website;
 }
 
-// ── findNextPageUrl ────────────────────────────────────────────────────────────
-// Looks for a "next page" link on the current page.
-// Returns the full URL of the next page, or null if there isn't one.
-function findNextPageUrl($, currentUrl) {
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  SECTION 6 — PAGINATION
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Returns the URL of the next page, or null if there isn't one.
+// Combines profile-specific selectors with the universal defaults.
+function findNextPageUrl($, currentUrl, profile) {
+  const extraSelectors = (profile && profile.nextPage)   || [];
+  const extraText      = (profile && profile.nextPageText)|| [];
+  const allSelectors   = [...extraSelectors, ...DEFAULT_NEXT_PAGE_SELECTORS];
+  const allText        = [...extraText, ...NEXT_PAGE_TEXT];
+
   let nextHref = null;
 
-  // Approach A: try CSS selectors (e.g. a.next, a[rel="next"])
-  for (const sel of SELECTORS.nextPage) {
-    const el = $(sel).first();
-    if (el.length) {
-      nextHref = el.attr('href') || null;
-      if (nextHref) break;
-    }
+  // Approach A: CSS selectors
+  for (const sel of allSelectors) {
+    const href = $(sel).first().attr('href');
+    if (href) { nextHref = href; break; }
   }
 
-  // Approach B: scan all links for text like "Next", "»", etc.
+  // Approach B: scan visible link text
   if (!nextHref) {
     $('a[href]').each((_i, a) => {
-      const text = $(a).text().trim().toLowerCase();
-      if (NEXT_LINK_TEXT.includes(text)) {
-        nextHref = $(a).attr('href') || null;
+      if (allText.includes($(a).text().trim().toLowerCase())) {
+        nextHref = $(a).attr('href');
         if (nextHref) return false; // break
       }
     });
@@ -289,304 +460,159 @@ function findNextPageUrl($, currentUrl) {
 
   if (!nextHref) return null;
 
-  // Resolve relative URLs against the current page
-  // e.g. "?page=2" becomes "https://example.com/directory/?page=2"
-  try {
-    return new URL(nextHref, currentUrl).href;
-  } catch {
-    return null;
-  }
+  try { return new URL(nextHref, currentUrl).href; }
+  catch { return null; }
 }
 
-// ── scrapeOnePage ──────────────────────────────────────────────────────────────
-// Fetches one directory page URL and extracts all company entries on it.
-// Returns: { companies: [{name, website}], nextUrl: string|null }
-async function scrapeOnePage(url, pageNumber) {
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  SECTION 7 — PAGE SCRAPER
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Fetches one directory page and returns all company entries found on it.
+async function scrapeOnePage(url, pageNumber, profile) {
   const html = await fetchPage(url);
   const $    = cheerio.load(html);
 
-  // Find the first container selector that matches
-  let containers      = $();
-  let matchedSelector = null;
+  const { containers, matchedSelector, method } = findContainers($, profile);
 
-  for (const sel of SELECTORS.containers) {
-    const found = $(sel);
-    if (found.length > 0) {
-      containers      = found;
-      matchedSelector = sel;
-      break;
-    }
-  }
-
-  if (containers.length === 0) {
-    console.log(`  ⚠  Page ${pageNumber}: no container selector matched`);
+  if (!containers.length) {
+    console.log(`  ⚠  Page ${pageNumber}: no containers found (tried profile + all fallbacks)`);
     return { companies: [], nextUrl: null };
   }
 
-  console.log(`  ✓  Page ${pageNumber}: matched "${matchedSelector}" → ${containers.length} containers`);
+  const methodLabel = method === 'profile' ? '📋 profile' : '🔍 auto-detected';
+  console.log(`  ✓  Page ${pageNumber}: ${methodLabel} selector "${matchedSelector}" → ${containers.length} containers`);
 
   // Extract name + website from each container
+  const nameSelectors = profile && profile.nameSelectors;
   const companies = [];
+
   containers.each((_i, el) => {
-    const name    = extractName($, el);
-    const website = extractWebsite($, el);
-    // Only keep entries where we found at least something
-    if (name || website) {
-      companies.push({ name, website });
-    }
+    const name    = extractName($, el, nameSelectors);
+    const website = extractWebsite($, el, profile);
+    if (name || website) companies.push({ name, website });
   });
 
   console.log(`  →  Page ${pageNumber}: extracted ${companies.length} raw entries`);
 
-  const nextUrl = findNextPageUrl($, url);
-  if (nextUrl) {
-    console.log(`  ↪  Page ${pageNumber}: next page → ${nextUrl}`);
-  } else {
-    console.log(`  ✋  Page ${pageNumber}: no next page — stopping`);
-  }
+  const nextUrl = findNextPageUrl($, url, profile);
+  console.log(nextUrl
+    ? `  ↪  Page ${pageNumber}: next page → ${nextUrl}`
+    : `  ✋  Page ${pageNumber}: no next page — stopping`);
 
   return { companies, nextUrl };
 }
 
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  SECTION 4 — COMPANY NAME CLEANING & QUALITY CHECK
+//  SECTION 8 — COMPANY NAME CLEANING & QUALITY CHECK
 // ═════════════════════════════════════════════════════════════════════════════
 
-// ── cleanName ──────────────────────────────────────────────────────────────────
-// Strips common junk from a raw name string.
-//
-// Many page titles look like:  "Acme Ltd | Home"  or  "Acme - Official Website"
-// This function splits on separators (|, -, –, —, :), throws away any segment
-// that's in TITLE_JUNK_SEGMENTS, and returns the first remaining segment.
-//
-// ▶ If you see new junk patterns in the output, add them to TITLE_JUNK_SEGMENTS
-//   near the top of this file.
-//
-// Examples:
-//   "Acme Ltd | Home"           →  "Acme Ltd"
-//   "Acme – Official Website"   →  "Acme"
-//   "  Welcome  "               →  "Welcome"  (still caught by isWeakName)
+// Strips junk suffixes like "| Home" or "- Official Website" from a raw string.
+// ▶ Add more patterns to TITLE_JUNK_SEGMENTS at the top if needed.
 function cleanName(raw) {
   if (!raw) return '';
-
   let name = raw.trim();
-
-  // Split on pipe, dash variants, colon — these are separator characters
   const parts = name.split(/\s*[|\-–—:]\s*/);
-
-  // Keep only parts that aren't in the junk list and aren't empty
-  const meaningful = parts.filter(p => {
-    const lower = p.trim().toLowerCase();
-    return p.trim().length > 1 && !TITLE_JUNK_SEGMENTS.includes(lower);
-  });
-
-  // Take the first meaningful part, or fall back to the full original string
+  const meaningful = parts.filter(p =>
+    p.trim().length > 1 && !TITLE_JUNK_SEGMENTS.includes(p.trim().toLowerCase())
+  );
   name = (meaningful[0] || parts[0] || name).trim();
-
-  // Remove any stray separator characters left at the start or end
-  name = name.replace(/^[|\-–—:,.\s]+|[|\-–—:,.\s]+$/g, '').trim();
-
-  return name;
+  return name.replace(/^[|\-–—:,.\s]+|[|\-–—:,.\s]+$/g, '').trim();
 }
 
-// ── isWeakName ─────────────────────────────────────────────────────────────────
-// Returns true if a name is NOT good enough to use — meaning we should try
-// the company's own website to get a better name.
-//
-// ▶ If the quality check is too strict (rejecting valid names), loosen the rules.
-// ▶ If it's too loose (passing bad names), add more conditions here.
+// Returns true if a name is too weak to use — triggers website resolution.
+// ▶ Adjust rules here if valid names are being rejected or junk is getting through.
 function isWeakName(name, website) {
-  if (!name || name.trim().length < 2) return true; // empty or single character
-
+  if (!name || name.trim().length < 2) return true;
   const lower = name.trim().toLowerCase();
-
-  // In our GENERIC_NAMES set (e.g. "home", "welcome", "website")
   if (GENERIC_NAMES.has(lower)) return true;
-
-  // Too short — unlikely to be a real company name
-  if (name.trim().length < 3) return true;
-
-  // The text itself looks like a web address
-  if (looksLikeUrl(name)) return true;
-
-  // The name exactly matches the domain of the website
-  // e.g. name = "acme", website = "https://acme.co.uk"
+  if (name.trim().length < 3)   return true;
+  if (looksLikeUrl(name))       return true;
   if (website) {
     try {
-      const hostname  = new URL(website).hostname.replace(/^www\./, '');
-      const domainBase = hostname.split('.')[0].toLowerCase(); // "acme" from "acme.co.uk"
-      if (lower === domainBase || lower === hostname.toLowerCase()) return true;
-    } catch { /* ignore malformed URLs */ }
+      const domain = new URL(website).hostname.replace(/^www\./, '').split('.')[0];
+      if (lower === domain.toLowerCase()) return true;
+    } catch { /* ignore */ }
   }
-
-  return false; // name looks fine
+  return false;
 }
 
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  SECTION 5 — COMPANY WEBSITE RESOLUTION
-//  (visiting each company's own website to find a better name)
+//  SECTION 9 — COMPANY WEBSITE RESOLUTION
+//  (visiting each company's own website to find a reliable name)
 // ═════════════════════════════════════════════════════════════════════════════
 
-// ── resolveNameFromWebsite ─────────────────────────────────────────────────────
-// Visits a company's own website and tries to extract the company name.
-//
-// Sources tried in order (most reliable first):
-//   1. <meta property="og:site_name">   — explicitly set by the website owner
-//   2. <meta name="application-name">   — set by many CMS platforms
-//   3. <title> tag                      — reliable but often has junk suffixes
-//   4. Logo image alt text              — often the company name
-//   5. <h1>                             — last resort; may be a tagline
-//
-// Returns: { name: string, source: string }  or  null if nothing usable found.
-// Never throws — any network or parse error returns null silently.
+// Visits a company website and tries to extract the company name.
+// Sources tried in order: og:site_name → application-name → <title>
+//                         → logo alt text → <h1>
+// Returns { name, source } or null on failure.
 async function resolveNameFromWebsite(url) {
   let html;
   try {
     html = await fetchPage(url, WEBSITE_FETCH_TIMEOUT_MS);
   } catch (err) {
-    // Work out why it failed and log a clear one-line message.
-    // axios puts the error type in err.code — ECONNABORTED means it timed out.
     const isTimeout = err.code === 'ECONNABORTED' || err.message?.includes('timeout');
-    const reason    = isTimeout ? `timed out (>${WEBSITE_FETCH_TIMEOUT_MS}ms)` : err.message;
-    console.log(`     ⏩ skipped ${url} — ${reason}`);
-    return null; // carry on with the rest; this entry will be marked "Unknown"
+    console.log(`     ⏩ skipped ${url} — ${isTimeout ? `timed out (>${WEBSITE_FETCH_TIMEOUT_MS}ms)` : err.message}`);
+    return null;
   }
 
   const $ = cheerio.load(html);
+  const sources = [
+    { sel: () => $('meta[property="og:site_name"]').attr('content'), key: 'website_og_site_name' },
+    { sel: () => $('meta[name="application-name"]').attr('content'), key: 'website_application_name' },
+    { sel: () => $('title').first().text(),                          key: 'website_title' },
+    { sel: () => $('img[class*="logo"],img[id*="logo"],a[class*="logo"] img,header img').first().attr('alt'), key: 'website_logo_alt' },
+    { sel: () => $('h1').first().text(),                             key: 'website_h1' },
+  ];
 
-  // ── 1. og:site_name ─────────────────────────────────────────────────────────
-  // Example HTML: <meta property="og:site_name" content="Acme Ltd">
-  const ogSiteName = ($('meta[property="og:site_name"]').attr('content') || '').trim();
-  if (ogSiteName) {
-    const cleaned = cleanName(ogSiteName);
-    if (!isWeakName(cleaned, url)) return { name: cleaned, source: 'website_og_site_name' };
+  for (const { sel, key } of sources) {
+    const raw     = (sel() || '').trim();
+    const cleaned = cleanName(raw);
+    if (!isWeakName(cleaned, url)) return { name: cleaned, source: key };
   }
-
-  // ── 2. application-name ──────────────────────────────────────────────────────
-  // Example HTML: <meta name="application-name" content="Acme Ltd">
-  const appName = ($('meta[name="application-name"]').attr('content') || '').trim();
-  if (appName) {
-    const cleaned = cleanName(appName);
-    if (!isWeakName(cleaned, url)) return { name: cleaned, source: 'website_application_name' };
-  }
-
-  // ── 3. <title> tag ───────────────────────────────────────────────────────────
-  // Example HTML: <title>Acme Ltd | Home</title>
-  // cleanName() strips the "| Home" part
-  const title = ($('title').first().text() || '').trim();
-  if (title) {
-    const cleaned = cleanName(title);
-    if (!isWeakName(cleaned, url)) return { name: cleaned, source: 'website_title' };
-  }
-
-  // ── 4. Logo image alt text ───────────────────────────────────────────────────
-  // Looks for images likely to be the site logo based on class/id names
-  const logoEl  = $('img[class*="logo"], img[id*="logo"], a[class*="logo"] img, header img').first();
-  const logoAlt = (logoEl.attr('alt') || '').trim();
-  if (logoAlt) {
-    const cleaned = cleanName(logoAlt);
-    if (!isWeakName(cleaned, url)) return { name: cleaned, source: 'website_logo_alt' };
-  }
-
-  // ── 5. <h1> tag ──────────────────────────────────────────────────────────────
-  // Last resort — may be a tagline, page heading, or marketing copy
-  const h1 = ($('h1').first().text() || '').trim();
-  if (h1) {
-    const cleaned = cleanName(h1);
-    if (!isWeakName(cleaned, url)) return { name: cleaned, source: 'website_h1' };
-  }
-
-  return null; // nothing usable found on this website
+  return null;
 }
 
-
-// ── runWithConcurrency ─────────────────────────────────────────────────────────
-// Runs an async function over an array of items, but limits how many can run
-// at the same time.
-//
-// Think of it like a checkout queue: only `limit` people can be served at once.
-// As soon as one finishes, the next one in the queue starts automatically.
-//
-// Why this matters: without a limit, we'd fire off hundreds of website requests
-// simultaneously — likely triggering rate-limiting or crashing the server.
-//
-// Parameters:
-//   items   — the list of things to process (any array)
-//   asyncFn — an async function that processes one item: asyncFn(item, index)
-//   limit   — maximum number of simultaneous operations
-//
-// Returns: an array of results in the same order as the input items.
+// Limits simultaneous async operations to `limit` at a time.
+// Works like a checkout queue — as one finishes, the next starts.
 async function runWithConcurrency(items, asyncFn, limit) {
   const results = new Array(items.length).fill(null);
-
-  // Build a queue of tasks, each tagged with its original array index
-  // so we can put results back in the right position
-  const queue = items.map((item, i) => ({ item, i }));
-
-  // Each worker pulls jobs from the shared queue until it's empty
+  const queue   = items.map((item, i) => ({ item, i }));
   async function worker() {
-    while (queue.length > 0) {
-      const { item, i } = queue.shift(); // take next task
+    while (queue.length) {
+      const { item, i } = queue.shift();
       results[i] = await asyncFn(item, i);
     }
   }
-
-  // Start `limit` workers running in parallel — they all share the same queue
-  const workers = Array.from(
-    { length: Math.min(limit, items.length) },
-    () => worker()
-  );
-  await Promise.all(workers);
-
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
   return results;
 }
 
-
-// ── resolveAllNames ────────────────────────────────────────────────────────────
-// The main name resolution pipeline.
-//
-// Takes the raw { name, website } list from directory scraping and produces a
-// clean { companyName, website, sourceOfName } list.
-//
-// Steps:
-//   1. Check each directory-page name with isWeakName()
-//   2. Collect all entries whose name is weak and that have a website URL
-//   3. Fetch those websites concurrently (limited by RESOLVE_CONCURRENCY)
-//   4. Cache results so the same domain is never fetched twice
-//   5. Merge everything back into the final output array
+// Visits every company website to resolve a reliable name.
+// Directory-page names are ignored entirely — too unreliable across sites.
 async function resolveAllNames(rawCompanies) {
+  const withWebsite    = rawCompanies.filter(c => !!c.website);
+  const withoutWebsite = rawCompanies.filter(c => !c.website);
 
-  // All entries go to the company website for name resolution.
-  // The name scraped from the directory page is ignored — it was unreliable.
-  // The website URL (scraped from the directory) is what we use to fetch the name.
+  console.log(`\n  ── Name resolution ───────────────────────────────`);
+  console.log(`     ${withWebsite.length} entries have a website URL`);
+  console.log(`     ${withoutWebsite.length} have no website — will be "Unknown"`);
 
-  const withWebsite    = rawCompanies.filter(({ website }) => !!website);
-  const withoutWebsite = rawCompanies.filter(({ website }) => !website);
-
-  console.log(`\n  ── Name resolution ──────────────────────────────`);
-  console.log(`     ${withWebsite.length} entries have a website — will fetch each one`);
-  console.log(`     ${withoutWebsite.length} entries have no website — will be marked "Unknown"`);
-
-  // Cache: normalised URL → resolved result ({ name, source }) or null.
-  // Prevents fetching the same domain more than once if it appears in multiple entries.
-  const websiteCache = new Map();
-
-  // Build a deduplicated list of unique URLs to fetch
+  // Build a deduplicated list of URLs to fetch
+  const websiteCache  = new Map();
   const uniqueToFetch = [];
   for (const { website } of withWebsite) {
     const key = website.replace(/\/+$/, '').toLowerCase();
     if (!websiteCache.has(key)) {
-      websiteCache.set(key, null); // placeholder so we don't add it twice
+      websiteCache.set(key, null);
       uniqueToFetch.push({ key, url: website });
     }
   }
-
   console.log(`     (${uniqueToFetch.length} unique domains to fetch)`);
 
-  // Fetch all unique websites concurrently, limited by RESOLVE_CONCURRENCY.
-  // A counter lets us print "3/42" style progress in the terminal.
   let doneCount = 0;
   await runWithConcurrency(uniqueToFetch, async ({ key, url }) => {
     const result = await resolveNameFromWebsite(url);
@@ -595,10 +621,8 @@ async function resolveAllNames(rawCompanies) {
     if (result) {
       console.log(`     ✓ [${doneCount}/${uniqueToFetch.length}] ${url} → "${result.name}" (${result.source})`);
     }
-    // Timed-out/failed sites already logged their own ⏩ line inside resolveNameFromWebsite
   }, RESOLVE_CONCURRENCY);
 
-  // Build the final output
   let resolvedCount = 0;
   let failedCount   = 0;
 
@@ -606,122 +630,91 @@ async function resolveAllNames(rawCompanies) {
     if (website) {
       const key      = website.replace(/\/+$/, '').toLowerCase();
       const resolved = websiteCache.get(key);
-
-      if (resolved && resolved.name) {
+      if (resolved?.name) {
         resolvedCount++;
-        return {
-          companyName:  resolved.name,
-          website:      website,
-          sourceOfName: resolved.source,
-        };
+        return { companyName: resolved.name, website, sourceOfName: resolved.source };
       }
     }
-
-    // No website, or website fetch failed
     failedCount++;
-    return {
-      companyName:  'Unknown',
-      website:      website,
-      sourceOfName: 'unknown',
-    };
+    return { companyName: 'Unknown', website, sourceOfName: 'unknown' };
   });
 
-  console.log(`     ${resolvedCount} names resolved from company websites`);
-  console.log(`     ${failedCount} could not be resolved → marked "Unknown"`);
+  console.log(`     ${resolvedCount} resolved · ${failedCount} unknown`);
   console.log(`  ─────────────────────────────────────────────────`);
-
   return finalCompanies;
 }
 
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  SECTION 6 — ROUTES
+//  SECTION 10 — ROUTES
 // ═════════════════════════════════════════════════════════════════════════════
 
 // ── POST /scrape ───────────────────────────────────────────────────────────────
-// Body:    { url: "https://..." }
-// Returns: { companies: [{companyName, website, sourceOfName}], count, pageCount }
 app.post('/scrape', async (req, res) => {
   const { url } = req.body;
-
-  if (!url) {
-    return res.status(400).json({ error: 'A URL is required.' });
-  }
+  if (!url) return res.status(400).json({ error: 'A URL is required.' });
 
   let startUrl;
-  try {
-    startUrl = new URL(url).href; // normalise (e.g. encode spaces in query params)
-  } catch {
-    return res.status(400).json({ error: 'That does not look like a valid URL.' });
-  }
+  try { startUrl = new URL(url).href; }
+  catch { return res.status(400).json({ error: 'That does not look like a valid URL.' }); }
+
+  // Look up a site profile for this domain
+  const profile = getProfile(startUrl);
 
   console.log(`\n${'─'.repeat(60)}`);
-  console.log(`  Starting scrape: ${startUrl}`);
+  console.log(`  Scraping: ${startUrl}`);
+  console.log(`  Profile:  ${profile ? 'matched (' + new URL(startUrl).hostname + ')' : 'none — using auto-detection'}`);
+  if (profile) console.log(`  Layout:   ${profile.layout}`);
   console.log(`${'─'.repeat(60)}`);
 
   try {
-    // ── Step 1: Scrape all directory pages ──────────────────────────────────
+    // ── Scrape all pages ──────────────────────────────────────────────────
     const allRaw   = [];
     let currentUrl = startUrl;
     let pageNumber = 1;
 
     while (currentUrl && pageNumber <= MAX_PAGES) {
-      const { companies, nextUrl } = await scrapeOnePage(currentUrl, pageNumber);
+      const { companies, nextUrl } = await scrapeOnePage(currentUrl, pageNumber, profile);
       allRaw.push(...companies);
-
-      if (companies.length === 0) {
-        console.log(`  ⚠  Page ${pageNumber} returned 0 entries — stopping pagination`);
+      if (!companies.length) {
+        console.log(`  ⚠  Page ${pageNumber} returned 0 entries — stopping`);
         break;
       }
-
       currentUrl = nextUrl;
       pageNumber++;
       if (currentUrl) await sleep(PAGE_DELAY_MS);
     }
 
-    if (pageNumber > MAX_PAGES) {
-      console.log(`  ⚠  Reached MAX_PAGES limit (${MAX_PAGES}) — stopping`);
-    }
-
     const totalPages = pageNumber - 1;
-    console.log(`\n  Total pages scraped  : ${totalPages}`);
-    console.log(`  Total raw entries    : ${allRaw.length}`);
+    console.log(`\n  Pages scraped  : ${totalPages}`);
+    console.log(`  Raw entries    : ${allRaw.length}`);
 
-    // ── Step 2: Deduplicate ─────────────────────────────────────────────────
-    // Remove entries with the same website URL (or same name if no URL).
-    // We deduplicate BEFORE website resolution so we don't waste fetch requests.
-    const seenWebsites = new Set();
-    const seenNames    = new Set();
-
-    const deduped = allRaw.filter(({ name, website }) => {
+    // ── Deduplicate ───────────────────────────────────────────────────────
+    const seenWeb   = new Set();
+    const seenNames = new Set();
+    const deduped   = allRaw.filter(({ name, website }) => {
       if (website) {
         const key = website.replace(/\/+$/, '').toLowerCase();
-        if (seenWebsites.has(key)) return false;
-        seenWebsites.add(key);
-        return true;
+        if (seenWeb.has(key)) return false;
+        seenWeb.add(key); return true;
       } else {
         const key = (name || '').toLowerCase();
         if (seenNames.has(key)) return false;
-        seenNames.add(key);
-        return true;
+        seenNames.add(key); return true;
       }
     });
+    console.log(`  After dedup    : ${deduped.length}`);
 
-    console.log(`  After deduplication  : ${deduped.length} entries`);
-
-    // ── Step 3: Resolve company names ───────────────────────────────────────
-    // For entries with weak/missing names, visit the company website to find
-    // a better name using og:site_name, title, etc.
+    // ── Resolve names from company websites ───────────────────────────────
     const companies = await resolveAllNames(deduped);
-
-    console.log(`\n  Final company count  : ${companies.length}`);
+    console.log(`\n  Final count    : ${companies.length}`);
     console.log(`${'─'.repeat(60)}\n`);
 
-    if (companies.length === 0) {
+    if (!companies.length) {
       return res.status(422).json({
         error:
-          'No companies were found. The page structure may not match any known ' +
-          'selector, or the site may require JavaScript to render its content. ' +
+          'No companies found. The page may use JavaScript to render its content ' +
+          '(try a headless browser), or no selector matched the layout. ' +
           'Check the server terminal for details.',
       });
     }
@@ -736,12 +729,9 @@ app.post('/scrape', async (req, res) => {
 
 
 // ── POST /download ─────────────────────────────────────────────────────────────
-// Body:    { companies: [{companyName, website, sourceOfName}] }
-// Returns: a formatted .xlsx file
 app.post('/download', async (req, res) => {
   const { companies } = req.body;
-
-  if (!Array.isArray(companies) || companies.length === 0) {
+  if (!Array.isArray(companies) || !companies.length) {
     return res.status(400).json({ error: 'No company data provided.' });
   }
 
@@ -749,25 +739,20 @@ app.post('/download', async (req, res) => {
     const workbook  = new ExcelJS.Workbook();
     const worksheet = workbook.addWorksheet('Companies');
 
-    // Three columns: name, website, source
     worksheet.columns = [
       { header: 'Company Name', key: 'companyName',  width: 42 },
       { header: 'Website',      key: 'website',      width: 48 },
       { header: 'Name Source',  key: 'sourceOfName', width: 26 },
     ];
 
-    // Header row: white bold text on blue background
-    const headerRow = worksheet.getRow(1);
-    headerRow.font      = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
-    headerRow.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2563EB' } };
-    headerRow.alignment = { vertical: 'middle', horizontal: 'left' };
-    headerRow.height    = 22;
+    const hRow = worksheet.getRow(1);
+    hRow.font      = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
+    hRow.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2563EB' } };
+    hRow.alignment = { vertical: 'middle', horizontal: 'left' };
+    hRow.height    = 22;
 
-    // Add one row per company
     companies.forEach(({ companyName, website, sourceOfName }) => {
       const row = worksheet.addRow({ companyName, website, sourceOfName });
-
-      // Make the website a clickable hyperlink in Excel
       if (website) {
         const cell = row.getCell('website');
         cell.value = { text: website, hyperlink: website };
@@ -775,17 +760,12 @@ app.post('/download', async (req, res) => {
       }
     });
 
-    // Zebra-stripe every other data row for readability
-    worksheet.eachRow((row, rowNumber) => {
-      if (rowNumber > 1 && rowNumber % 2 === 0) {
+    worksheet.eachRow((row, n) => {
+      if (n > 1 && n % 2 === 0)
         row.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF3F4F6' } };
-      }
     });
 
-    res.setHeader(
-      'Content-Type',
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-    );
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', 'attachment; filename="companies.xlsx"');
     await workbook.xlsx.write(res);
     res.end();
