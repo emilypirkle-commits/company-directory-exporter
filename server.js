@@ -11,12 +11,33 @@ const express = require('express');
 const axios   = require('axios');
 const cheerio = require('cheerio');
 const ExcelJS = require('exceljs');
+const path    = require('path'); // built into Node — no install needed
+                                 // used to build absolute file paths that work
+                                 // on every machine and on Vercel
 
 const app  = express();
 const PORT = 3000;
 
 app.use(express.json());
-app.use(express.static('public'));
+
+// Serve everything in the /public folder as static files (HTML, CSS, JS).
+//
+// WHY path.join(__dirname, 'public') instead of just 'public':
+//   'public' is a *relative* path — it resolves from wherever Node was launched.
+//   Locally that's usually the project root, so it works fine.
+//   On Vercel the working directory is different, so 'public' points nowhere.
+//   __dirname is always the *absolute* path to the folder containing server.js,
+//   so path.join(__dirname, 'public') finds the right folder every time.
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Explicit route for the homepage "/".
+//
+// express.static() handles requests for named files like "/index.html",
+// but won't automatically serve index.html for a bare "/" on all platforms.
+// This route makes sure visiting the root URL always returns the app.
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
 
 
 // ═════════════════════════════════════════════════════════════════════════════
