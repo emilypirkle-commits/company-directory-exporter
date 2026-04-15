@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Company Directory Exporter</title>
+
+  <!-- ── Styles ──────────────────────────────────────────────────────────── -->
+  <style>
+    /* ── Reset / base ──────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #f8fafc;
+      color: #1e293b;
+      min-height: 100vh;
+      padding: 2rem 1rem;
+    }
+
+    /* ── Layout wrapper ────────────────────────────────────────────────── */
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+    }
+
+    /* ── Header ────────────────────────────────────────────────────────── */
+    h1 {
+      font-size: 1.6rem;
+      font-weight: 700;
+      margin-bottom: 0.25rem;
+      color: #0f172a;
+    }
+    .subtitle {
+      font-size: 0.95rem;
+      color: #64748b;
+      margin-bottom: 2rem;
+    }
+
+    /* ── Card wrapper for the input section ────────────────────────────── */
+    .card {
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+      box-shadow: 0 1px 3px rgba(0,0,0,.06);
+    }
+
+    /* ── URL input row ──────────────────────────────────────────────────── */
+    .input-row {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+
+    label {
+      display: block;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #374151;
+      margin-bottom: 0.5rem;
+    }
+
+    input[type="text"] {
+      flex: 1 1 300px;        /* grows to fill available width */
+      padding: 0.6rem 0.8rem;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      outline: none;
+      transition: border-color .2s;
+    }
+    input[type="text"]:focus {
+      border-color: #2563eb;
+      box-shadow: 0 0 0 3px rgba(37,99,235,.15);
+    }
+
+    /* ── Buttons ────────────────────────────────────────────────────────── */
+    button {
+      cursor: pointer;
+      border: none;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      padding: 0.6rem 1.2rem;
+      transition: background .15s, opacity .15s;
+    }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+
+    #scrapeBtn {
+      background: #2563eb;
+      color: #fff;
+      flex-shrink: 0;
+    }
+    #scrapeBtn:hover:not(:disabled) { background: #1d4ed8; }
+
+    #downloadBtn {
+      background: #16a34a;
+      color: #fff;
+      display: none;           /* hidden until results arrive */
+    }
+    #downloadBtn:hover:not(:disabled) { background: #15803d; }
+
+    #clearBtn {
+      background: #f1f5f9;
+      color: #475569;
+      display: none;
+    }
+    #clearBtn:hover:not(:disabled) { background: #e2e8f0; }
+
+    /* ── Status / error message ─────────────────────────────────────────── */
+    #status {
+      margin-top: 1rem;
+      font-size: 0.88rem;
+      min-height: 1.4rem;
+    }
+    #status.error   { color: #dc2626; }
+    #status.success { color: #16a34a; }
+    #status.loading { color: #64748b; }
+
+    /* ── Results section ────────────────────────────────────────────────── */
+    #results {
+      display: none;           /* hidden until data arrives */
+    }
+
+    .results-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-bottom: 0.75rem;
+    }
+    .results-header h2 {
+      font-size: 1rem;
+      font-weight: 700;
+    }
+    .results-header .count-badge {
+      background: #eff6ff;
+      color: #2563eb;
+      border: 1px solid #bfdbfe;
+      border-radius: 999px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      padding: 0.2rem 0.7rem;
+    }
+
+    /* ── Scrollable table wrapper ───────────────────────────────────────── */
+    .table-wrap {
+      overflow-x: auto;
+      border-radius: 10px;
+      border: 1px solid #e2e8f0;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.88rem;
+    }
+
+    thead th {
+      background: #2563eb;
+      color: #fff;
+      text-align: left;
+      padding: 0.65rem 1rem;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    tbody tr:nth-child(even) { background: #f8fafc; }
+    tbody tr:hover           { background: #eff6ff; }
+
+    tbody td {
+      padding: 0.55rem 1rem;
+      border-top: 1px solid #f1f5f9;
+      max-width: 400px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    /* Make website links look like links */
+    tbody td a {
+      color: #2563eb;
+      text-decoration: none;
+    }
+    tbody td a:hover { text-decoration: underline; }
+
+    /* Empty cell placeholder */
+    .empty-cell { color: #94a3b8; font-style: italic; }
+
+    /* ── Source badge — small label in the Source column ───────────────── */
+    .source-badge {
+      display: inline-block;
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 0.15rem 0.5rem;
+      border-radius: 999px;
+      white-space: nowrap;
+    }
+    /* Green: name came straight from the directory page */
+    .source-badge.directory         { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
+    /* Blue: name came from the company's own website */
+    .source-badge.website           { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
+    /* Grey: name could not be determined */
+    .source-badge.unknown           { background: #f8fafc; color: #94a3b8; border: 1px solid #e2e8f0; }
+  </style>
+</head>
+<body>
+
+<div class="container">
+
+  <!-- ── Header ────────────────────────────────────────────────────────── -->
+  <h1>Company Directory Exporter</h1>
+  <p class="subtitle">Paste a member/company directory URL, preview the results, then download as Excel.</p>
+
+  <!-- ── Input card ────────────────────────────────────────────────────── -->
+  <div class="card">
+    <label for="urlInput">Directory page URL</label>
+
+    <div class="input-row">
+      <input
+        type="text"
+        id="urlInput"
+        placeholder="https://www.example.org/member-directory/?page=1"
+        spellcheck="false"
+      />
+      <button id="scrapeBtn">Scrape</button>
+      <button id="downloadBtn">Download Excel</button>
+      <button id="clearBtn">Clear</button>
+    </div>
+
+    <!-- Status line shown below the input -->
+    <div id="status"></div>
+  </div>
+
+  <!-- ── Results table (hidden until data arrives) ─────────────────────── -->
+  <div id="results">
+    <div class="results-header">
+      <h2>Preview</h2>
+      <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
+        <!-- Shows total company count -->
+        <span class="count-badge" id="countBadge">0 companies</span>
+        <!-- Shows how many pages were scraped — hidden until data arrives -->
+        <span class="count-badge" id="pageBadge" style="background:#f0fdf4;color:#16a34a;border-color:#bbf7d0;display:none;"></span>
+      </div>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Company Name</th>
+            <th>Website</th>
+            <th>Name Source</th>
+          </tr>
+        </thead>
+        <tbody id="tableBody">
+          <!-- Rows are injected here by JavaScript -->
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div><!-- /container -->
+
+
+<!-- ── JavaScript ─────────────────────────────────────────────────────────── -->
+<script>
+  // Grab references to the DOM elements we'll interact with
+  const urlInput   = document.getElementById('urlInput');
+  const scrapeBtn  = document.getElementById('scrapeBtn');
+  const downloadBtn= document.getElementById('downloadBtn');
+  const clearBtn   = document.getElementById('clearBtn');
+  const statusEl   = document.getElementById('status');
+  const resultsEl  = document.getElementById('results');
+  const tableBody  = document.getElementById('tableBody');
+  const countBadge = document.getElementById('countBadge');
+  const pageBadge  = document.getElementById('pageBadge');
+
+  // This array holds the scraped data so we can pass it to the download endpoint
+  let scrapedCompanies = [];
+
+
+  // ── Helper: update the status message ─────────────────────────────────
+  function setStatus(message, type = '') {
+    statusEl.textContent = message;
+    statusEl.className = type; // 'loading' | 'success' | 'error' | ''
+  }
+
+
+  // ── Helper: build the preview table ──────────────────────────────────────
+  // Each company object now has: { companyName, website, sourceOfName }
+  function populateTable(companies) {
+    tableBody.innerHTML = ''; // clear previous results
+
+    companies.forEach(({ companyName, website, sourceOfName }, index) => {
+      const tr = document.createElement('tr');
+
+      // ── Row number ───────────────────────────────────────────────────────
+      const numTd = document.createElement('td');
+      numTd.textContent = index + 1;
+
+      // ── Company name ─────────────────────────────────────────────────────
+      const nameTd = document.createElement('td');
+      nameTd.textContent = companyName || '—';
+      if (!companyName || companyName === 'Unknown') nameTd.classList.add('empty-cell');
+
+      // ── Website ──────────────────────────────────────────────────────────
+      const webTd = document.createElement('td');
+      if (website) {
+        const a = document.createElement('a');
+        a.href        = website;
+        a.target      = '_blank';
+        a.rel         = 'noopener noreferrer';
+        a.textContent = website;
+        webTd.appendChild(a);
+      } else {
+        webTd.textContent = 'N/A';
+        webTd.classList.add('empty-cell');
+      }
+
+      // ── Source badge ─────────────────────────────────────────────────────
+      // Shows where the name came from so you can spot-check quality easily.
+      // Colour-coded: green = directory, blue = company website, grey = unknown
+      const sourceTd = document.createElement('td');
+      const badge    = document.createElement('span');
+      badge.classList.add('source-badge');
+
+      if (!sourceOfName || sourceOfName === 'unknown') {
+        badge.classList.add('unknown');
+        badge.textContent = 'unknown';
+      } else if (sourceOfName === 'directory') {
+        badge.classList.add('directory');
+        badge.textContent = 'directory';
+      } else {
+        // Any "website_*" source (og:site_name, title, h1, etc.)
+        badge.classList.add('website');
+        // Make it human-readable: "website_og_site_name" → "og:site_name"
+        badge.textContent = sourceOfName.replace('website_', '').replace(/_/g, ':');
+        badge.title = sourceOfName; // full value on hover
+      }
+      sourceTd.appendChild(badge);
+
+      tr.appendChild(numTd);
+      tr.appendChild(nameTd);
+      tr.appendChild(webTd);
+      tr.appendChild(sourceTd);
+      tableBody.appendChild(tr);
+    });
+  }
+
+
+  // ── Scrape button: send URL to /scrape, display results ───────────────
+  scrapeBtn.addEventListener('click', async () => {
+    const url = urlInput.value.trim();
+
+    if (!url) {
+      setStatus('Please enter a URL first.', 'error');
+      return;
+    }
+
+    // Basic URL format check before hitting the server
+    try { new URL(url); }
+    catch {
+      setStatus('That doesn\'t look like a valid URL. Make sure it starts with https://', 'error');
+      return;
+    }
+
+    // Disable button and show loading feedback.
+    // Multi-page scraping can take a while, so we warn the user to be patient.
+    scrapeBtn.disabled = true;
+    setStatus('Scraping all pages… this may take a minute. Check the server console for live progress.', 'loading');
+    resultsEl.style.display  = 'none';
+    downloadBtn.style.display = 'none';
+    clearBtn.style.display    = 'none';
+    pageBadge.style.display   = 'none';
+
+    try {
+      // POST the URL to our Express server
+      const response = await fetch('/scrape', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+      });
+
+      const data = await response.json();
+
+      // The server returns { error: "..." } when something went wrong
+      if (!response.ok || data.error) {
+        setStatus(`Error: ${data.error || 'Unknown error'}`, 'error');
+        return;
+      }
+
+      if (data.count === 0) {
+        setStatus(
+          'No companies found on that page. The page may use JavaScript to load content, ' +
+          'or the HTML structure wasn\'t recognised.',
+          'error'
+        );
+        return;
+      }
+
+      // Store results so the Download button can use them
+      scrapedCompanies = data.companies;
+
+      // Show the table and action buttons
+      populateTable(scrapedCompanies);
+
+      // Update the company count badge
+      countBadge.textContent = `${data.count} ${data.count === 1 ? 'company' : 'companies'}`;
+
+      // Update the page count badge (server now returns how many pages were scraped)
+      if (data.pageCount) {
+        pageBadge.textContent    = `${data.pageCount} ${data.pageCount === 1 ? 'page' : 'pages'} scraped`;
+        pageBadge.style.display  = 'inline-block';
+      }
+
+      resultsEl.style.display   = 'block';
+      downloadBtn.style.display = 'inline-block';
+      clearBtn.style.display    = 'inline-block';
+
+      setStatus(
+        `Done! Found ${data.count} ${data.count === 1 ? 'company' : 'companies'} ` +
+        `across ${data.pageCount} ${data.pageCount === 1 ? 'page' : 'pages'}.`,
+        'success'
+      );
+
+    } catch (err) {
+      // Network-level error (server not running, etc.)
+      setStatus(`Could not reach the server: ${err.message}`, 'error');
+    } finally {
+      scrapeBtn.disabled = false;
+    }
+  });
+
+
+  // ── Download button: POST scraped data to /download, save the file ────
+  downloadBtn.addEventListener('click', async () => {
+    if (scrapedCompanies.length === 0) return;
+
+    downloadBtn.disabled = true;
+    setStatus('Generating Excel file…', 'loading');
+
+    try {
+      const response = await fetch('/download', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ companies: scrapedCompanies }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json();
+        setStatus(`Error: ${data.error || 'Could not generate file'}`, 'error');
+        return;
+      }
+
+      // The server streams back binary Excel data.
+      // We convert it to a Blob and trigger a browser download.
+      const blob = await response.blob();
+      const blobUrl = URL.createObjectURL(blob);
+
+      // Create a temporary invisible <a> link and click it to start download
+      const a = document.createElement('a');
+      a.href     = blobUrl;
+      a.download = 'companies.xlsx';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+
+      // Free the temporary object URL from memory
+      URL.revokeObjectURL(blobUrl);
+
+      setStatus('Excel file downloaded!', 'success');
+
+    } catch (err) {
+      setStatus(`Download failed: ${err.message}`, 'error');
+    } finally {
+      downloadBtn.disabled = false;
+    }
+  });
+
+
+  // ── Clear button: reset everything back to the initial state ──────────
+  clearBtn.addEventListener('click', () => {
+    urlInput.value = '';
+    scrapedCompanies = [];
+    tableBody.innerHTML = '';
+    resultsEl.style.display   = 'none';
+    downloadBtn.style.display = 'none';
+    clearBtn.style.display    = 'none';
+    pageBadge.style.display   = 'none';
+    setStatus('');
+    urlInput.focus();
+  });
+
+
+  // ── Allow pressing Enter in the URL field to trigger scraping ─────────
+  urlInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') scrapeBtn.click();
+  });
+</script>
+
+</body>
+</html>

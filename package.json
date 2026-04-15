@@ -1,0 +1,15 @@
+{
+  "name": "company-directory-exporter",
+  "version": "1.0.0",
+  "description": "Scrape a company directory URL and export results to Excel",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "cheerio": "^1.0.0",
+    "exceljs": "^4.4.0",
+    "express": "^4.19.2"
+  }
+}

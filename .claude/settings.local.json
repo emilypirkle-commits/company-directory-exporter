@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Read(//usr/local/bin/**)",
+      "Bash(/opt/homebrew/bin/npm --version)",
+      "Bash(/usr/local/bin/npm --version)",
+      "Bash(export PATH=\"$PATH:/opt/homebrew/bin:/usr/local/bin\")",
+      "Bash(npm --version)",
+      "Read(//usr/bin/**)",
+      "Read(//Users/emilypirkle/**)",
+      "WebFetch(domain:www.tpi.org.uk)",
+      "Bash(/opt/homebrew/bin/node --version)",
+      "Bash(grep -E \"^\\(express|cheerio|exceljs|axios\\)$\")"
+    ]
+  }
+}
